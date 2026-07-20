@@ -209,17 +209,18 @@
   </div>
 
   <div class="stage" id="stage">
-    <video id="video" autoplay playsinline muted></video>
-    <canvas class="shot" id="shotCanvas"></canvas>
-    <div class="reticle">
+    <img id="preview" style="width:100%;height:100%;object-fit:cover;display:none;" />
+    <div class="reticle" id="reticleOverlay">
       <div class="corner tl"></div>
       <div class="corner tr"></div>
       <div class="corner bl"></div>
       <div class="corner br"></div>
     </div>
     <div class="scanline" id="scanline"></div>
-    <div class="hint" id="hint">enquadre a etiqueta e capture</div>
+    <div class="hint" id="hint">toque em "Capturar etiqueta" para abrir a câmera</div>
   </div>
+
+  <input type="file" id="fileInput" accept="image/*" capture="environment" style="display:none;" />
 
   <div class="controls">
     <button class="btn-secondary" id="retakeBtn" style="display:none;">Nova foto</button>
@@ -244,9 +245,10 @@
 
 <script>
 (function(){
-  const video = document.getElementById('video');
   const stage = document.getElementById('stage');
-  const shotCanvas = document.getElementById('shotCanvas');
+  const preview = document.getElementById('preview');
+  const reticleOverlay = document.getElementById('reticleOverlay');
+  const fileInput = document.getElementById('fileInput');
   const captureBtn = document.getElementById('captureBtn');
   const retakeBtn = document.getElementById('retakeBtn');
   const statusText = document.getElementById('statusText');
@@ -256,21 +258,6 @@
   const valNome = document.getElementById('valNome');
   const valCodigo = document.getElementById('valCodigo');
 
-  let stream = null;
-  let captured = false;
-
-  async function startCamera(){
-    try{
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' } },
-        audio: false
-      });
-      video.srcObject = stream;
-    }catch(e){
-      showError('Não consegui acessar a câmera. Verifique a permissão do navegador para câmera e recarregue a página.');
-    }
-  }
-
   function showError(msg){
     errorBox.textContent = msg;
     errorBox.classList.add('show');
@@ -279,32 +266,37 @@
     errorBox.classList.remove('show');
     errorBox.textContent = '';
   }
-
   function setScanning(on){
     stage.classList.toggle('scanning', on);
   }
 
-  captureBtn.addEventListener('click', async () => {
+  captureBtn.addEventListener('click', () => {
     clearError();
-    if(!captured){
-      // take the photo
-      const w = video.videoWidth, h = video.videoHeight;
-      shotCanvas.width = w; shotCanvas.height = h;
-      const ctx = shotCanvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, w, h);
-      shotCanvas.style.display = 'block';
-      video.style.display = 'none';
-      captured = true;
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if(!file) return;
+    clearError();
+    result.classList.remove('show');
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const dataUrl = reader.result;
+      preview.src = dataUrl;
+      preview.style.display = 'block';
+      reticleOverlay.style.display = 'none';
       captureBtn.textContent = 'Analisando…';
       captureBtn.disabled = true;
       retakeBtn.style.display = 'none';
       hint.textContent = 'lendo os dados da etiqueta…';
       setScanning(true);
-      result.classList.remove('show');
 
       try{
-        const base64 = shotCanvas.toDataURL('image/jpeg', 0.92).split(',')[1];
-        const data = await extractLabel(base64);
+        const base64 = dataUrl.split(',')[1];
+        const mediaType = file.type || 'image/jpeg';
+        const data = await extractLabel(base64, mediaType);
         valNome.textContent = data.nome && data.nome.trim() ? data.nome : '(não identificado)';
         valNome.classList.toggle('empty', !(data.nome && data.nome.trim()));
         valCodigo.textContent = data.codigo && data.codigo.trim() ? data.codigo : '(não identificado)';
@@ -312,28 +304,30 @@
         result.classList.add('show');
         hint.textContent = 'dados extraídos';
         statusText.textContent = '';
-      }catch(e){
-        showError('Não consegui extrair os dados dessa foto. Tente novamente com mais luz e a etiqueta bem enquadrada.');
-        hint.textContent = 'enquadre a etiqueta e capture';
+      }catch(err){
+        showError('Não consegui extrair os dados dessa foto (' + err.message + '). Tente novamente com mais luz e a etiqueta bem enquadrada.');
+        hint.textContent = 'toque em "Capturar etiqueta" para tentar de novo';
       }finally{
         setScanning(false);
         captureBtn.textContent = 'Capturar etiqueta';
         captureBtn.disabled = false;
         retakeBtn.style.display = 'block';
       }
-    }
+    };
+    reader.readAsDataURL(file);
+    fileInput.value = '';
   });
 
   retakeBtn.addEventListener('click', () => {
     clearError();
-    captured = false;
-    shotCanvas.style.display = 'none';
-    video.style.display = 'block';
-    hint.textContent = 'enquadre a etiqueta e capture';
+    preview.style.display = 'none';
+    reticleOverlay.style.display = 'block';
+    hint.textContent = 'toque em "Capturar etiqueta" para abrir a câmera';
     result.classList.remove('show');
+    fileInput.click();
   });
 
-  async function extractLabel(base64Image){
+  async function extractLabel(base64Image, mediaType){
     const systemPrompt = `Você lê fotos de etiquetas (muitas vezes não padronizadas, de equipamentos, produtos ou peças) e extrai exatamente dois campos:
 1. "nome": o nome ou identificação principal do item (o que a etiqueta identifica).
 2. "codigo": qualquer número de série, lote, código de identificação ou referência impresso na etiqueta.
@@ -354,7 +348,7 @@ Se um campo não estiver legível ou não existir na etiqueta, retorne string va
           {
             role: 'user',
             content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64Image } },
+              { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64Image } },
               { type: 'text', text: 'Extraia os dados dessa etiqueta seguindo exatamente o formato JSON pedido.' }
             ]
           }
@@ -372,6 +366,5 @@ Se um campo não estiver legível ou não existir na etiqueta, retorne string va
     return JSON.parse(clean);
   }
 
-  startCamera();
 })();
 </script>
